@@ -1,0 +1,223 @@
+---
+title: Notebook for running the multiple predictive models for determening if a mushroom is edible or poisonous.
+jupyter: python3
+---
+
+
+
+```{python}
+# General Imports 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import random
+
+# scikit-learn imports
+from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.inspection import permutation_importance
+from sklearn.preprocessing import LabelEncoder
+
+from xgboost import XGBClassifier # An external classifier
+
+# Fetching dataset
+from ucimlrepo import fetch_ucirepo  
+mushroom = fetch_ucirepo(id=73) 
+```
+
+The dataset used is composed of the visual descriptive caracteristics of hypothetical samples corresponding to 23 species of gilled mushrooms in the Agaricus and Lepiota Family.
+
+# ETL of data
+below we extract the data we need it, randomly split it into train and test, build the encoding algorythm necessary for preprocessing the categorical data, and prepare to load it into the ML pipeline.
+
+```{python}
+# Raw data (as pandas dataframes) 
+X = mushroom.data.features 
+y = mushroom.data.targets 
+
+# Setting up the encoder and preprocessor for the data
+encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('Categories', encoder, X.columns)
+    ],
+)
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42)
+
+# Initialize the LabelEncoder
+le = LabelEncoder()
+
+# Flatten (ravel) the target arrays and encode them to 0s and 1s
+y_train = le.fit_transform(np.ravel(y_train))
+y_test = le.transform(np.ravel(y_test))
+
+# Verify the mapping (Optional, but good to know which is which!)
+print("Target mapping:", dict(zip(le.classes_, le.transform(le.classes_))))
+
+# variable information 
+print(mushroom.variables) 
+print(X_train.shape)
+print(X_test.shape)
+X_train.head()
+```
+
+# Pipeline for comparing multiple predictive models
+
+```{python}
+full_pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('scaler', StandardScaler()), # Crucial for KNN and Logistic Regression
+    ('classifier', LogisticRegression()) # A placeholder for the classifier so GridSearch can swap models
+])
+
+# --- HYPERPARAMETER GRID ---
+# Note the 'classifier' key swaps the model type entirely
+param_grid = [
+    {
+        'classifier': [LogisticRegression(max_iter=1000)],
+        'classifier__C': [0.1, 1.0, 10.0],
+        'classifier__penalty': ['l2']
+    },
+    {
+        'classifier': [RandomForestClassifier(random_state=42)],
+        'classifier__n_estimators': [100, 200],
+        'classifier__max_depth': [None, 10]
+    },
+    {
+        'classifier': [XGBClassifier(eval_metric='logloss', random_state=42)],
+        'classifier__learning_rate': [0.05, 0.1],
+        'classifier__max_depth': [3, 6]
+    },
+    {
+        'classifier': [KNeighborsClassifier()],
+        'classifier__n_neighbors': [5, 11, 21],
+        'classifier__weights': ['uniform', 'distance']
+    }
+]
+```
+
+```{python}
+print("Starting Grid Search across 4 models...")
+grid_search = GridSearchCV(
+    full_pipeline, 
+    param_grid, 
+    cv=5, 
+    scoring='accuracy', 
+    n_jobs=-1, 
+    verbose=1
+)
+
+grid_search.fit(X_train, y_train)
+```
+
+# Results
+
+```{python}
+print("-" * 30)
+print(f"Best Model Type: {type(grid_search.best_params_['classifier']).__name__}")
+print(f"Best Accuracy: {grid_search.best_score_:.4f}")
+print(f"Best Parameters: {grid_search.best_params_}")
+print("-" * 30)
+
+# Evaluate on the unseen test set
+test_score = grid_search.score(X_test, y_test)
+print(f"Final Test Set Accuracy: {test_score:.4f}")
+```
+
+Given that we have succesfully done a perfect fit, a further process of our data will be done to trial how many relevant characteristics we can drop while still predicting succesfully if a mushroom is edible.
+
+To best challange the chosen models, the feature dropping will follow an importance criteria, where we will drop the most relevant feature across all models and retrain to see how much worse can these models work.
+
+```{python}
+
+# Start with all original features
+current_features = list(X.columns)
+dropped_features = []
+accuracy = 1.0
+
+print("Starting Feature Drop...")
+
+# Continue looping as long as we have a perfect fit and at least 1 feature remains
+while accuracy >= 0.95 and len(current_features) > 1:
+    print(f"\n--- Running with {len(current_features)} features ---")
+    
+    # 1. Subset the training and testing data
+    X_train_sub = X_train[current_features]
+    X_test_sub = X_test[current_features]
+    
+    # 2. Dynamically update the preprocessor so it only expects the remaining columns
+    current_preprocessor = ColumnTransformer(
+        transformers=[
+            ('Categories', OneHotEncoder(handle_unknown='ignore', sparse_output=False), current_features)
+        ]
+    )
+    
+    # 3. Rebuild the pipeline with the updated preprocessor
+    current_pipeline = Pipeline(steps=[
+        ('preprocessor', current_preprocessor),
+        ('scaler', StandardScaler()), 
+        ('classifier', LogisticRegression()) # Placeholder for grid search
+    ])
+    
+    # 4. Run the Grid Search 
+    grid_search = GridSearchCV(
+        current_pipeline, 
+        param_grid, 
+        cv=5, 
+        scoring='accuracy', 
+        n_jobs=-1, 
+        verbose=0 # Set to 0 to keep the loop output clean
+    )
+    grid_search.fit(X_train_sub, y_train)
+    
+    # 5. Evaluate the best model found
+    best_model = grid_search.best_estimator_
+    accuracy = grid_search.score(X_test_sub, y_test)
+    
+    print(f"Best Model: {type(best_model.named_steps['classifier']).__name__}")
+    print(f"Test Accuracy: {accuracy:.4f}")
+    
+    # Break the loop if the model can no longer perfectly predict
+    if accuracy < 0.95:
+        print("\nAccuracy dropped below 95%. Stopping!")
+        break
+        
+    # 6. Calculate Permutation Importance on the test set
+    # This evaluates which original column causes the biggest accuracy drop when shuffled
+    result = permutation_importance(
+        best_model, X_test_sub, y_test, n_repeats=5, random_state=42, n_jobs=-1
+    )
+    
+    # 7. Identify the feature with the highest importance (biggest influence)
+    most_important_idx = result.importances_mean.argmax()
+    most_important_feature = current_features[most_important_idx]
+    
+    print(f"Most influential feature found: '{most_important_feature}' (Importance score: {result.importances_mean[most_important_idx]:.4f})")
+    print(f"Dropping '{most_important_feature}'...")
+    
+    # 8. Remove the most important feature for the next iteration
+    current_features.remove(most_important_feature)
+    dropped_features.append(most_important_feature)
+
+print("\n" + "="*40)
+print("FINAL RESULTS")
+print("="*40)
+print(f"Total features dropped sequentially: {len(dropped_features)}")
+print(f"Order of dropped features: {dropped_features}")
+print(f"Remaining features: {current_features}")
+print(f"Final accuracy achieved: {accuracy:.4f}")
+```
+
+```{python}
+print(pd.DataFrame(grid_search.cv_results_)[['param_classifier', 'mean_test_score']])
+```
+
