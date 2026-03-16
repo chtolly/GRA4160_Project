@@ -12,6 +12,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import random
 
+# warning imports
+import warnings
+import os
+
+# This handles the Python level warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# This handles some lower-level C++ warnings often seen in XGBoost/Sklearn
+os.environ['PYTHONWARNINGS'] = 'ignore'
+
 # scikit-learn imports
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
